@@ -1,0 +1,95 @@
+name: Deploy to Cloudflare Pages
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ☁️ 将根目录 index.html 部署到 Cloudflare Pages
+#
+# 触发条件：
+#   - push 到 master 且 index.html 或本 workflow 文件本身发生变化
+#   - 在 Actions 页面手动运行（workflow_dispatch）
+#
+# 与 crawler.yml 的关系：
+#   - crawler.yml 负责「定时爬虫跑完后部署最新热点内容」
+#   - 本 workflow 负责「改动 index.html 模板/样式后 push 立即发布」
+#   - 两者共用同一组 CLOUDFLARE_* Secrets，互补不冲突
+#
+# Secrets 未配置齐全时自动跳过部署，不会报错或影响其它流程。
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - "index.html"
+      - ".github/workflows/deploy-cloudflare-pages.yml"
+  workflow_dispatch:
+
+concurrency:
+  # 同一分支的部署串行执行，避免 wrangler 同时 deploy 造成冲突
+  group: deploy-pages-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  deployments: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          clean: true
+
+      # --------------------------------------------------------------------------------
+      # 检测 Cloudflare 配置是否齐全（三 Secrets 缺一即跳过）
+      # 沿用 crawler.yml 的检测模式，确保两个 workflow 行为一致
+      # --------------------------------------------------------------------------------
+      - name: Check Cloudflare config
+        id: cf_check
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_PROJECT_NAME: ${{ secrets.CLOUDFLARE_PROJECT_NAME }}
+        run: |
+          if [ -n "$CLOUDFLARE_API_TOKEN" ] && [ -n "$CLOUDFLARE_ACCOUNT_ID" ] && [ -n "$CLOUDFLARE_PROJECT_NAME" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "✅ 检测到 Cloudflare 配置，准备部署到 Cloudflare Pages"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "ℹ️ 未配置 Cloudflare Secrets，跳过 Cloudflare Pages 部署"
+            echo "ℹ️ 配置教程详见 README「自动部署到 Cloudflare Pages」章节"
+          fi
+
+      - name: Prepare Cloudflare Pages assets
+        if: success() && steps.cf_check.outputs.enabled == 'true'
+        run: |
+          if [ ! -f index.html ]; then
+            echo "❌ 未找到 index.html，请确认仓库根目录存在该文件"
+            exit 1
+          fi
+          rm -rf cloudflare_dist
+          mkdir -p cloudflare_dist
+          cp index.html cloudflare_dist/index.html
+          echo "✅ 已准备部署产物：cloudflare_dist/index.html"
+
+      - name: Deploy to Cloudflare Pages
+        if: success() && steps.cf_check.outputs.enabled == 'true'
+        id: deploy
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy cloudflare_dist --project-name=${{ secrets.CLOUDFLARE_PROJECT_NAME }}
+
+      - name: Output deployment URL
+        if: success() && steps.cf_check.outputs.enabled == 'true'
+        env:
+          PROJECT_NAME: ${{ secrets.CLOUDFLARE_PROJECT_NAME }}
+        run: |
+          echo "🎉 部署成功！"
+          echo "🔗 访问地址：https://${PROJECT_NAME}.pages.dev"
